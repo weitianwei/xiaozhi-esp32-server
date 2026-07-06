@@ -38,7 +38,7 @@ class LLMProvider(LLMProviderBase):
         self.agent_id = str(config.get("agent_id", ""))
         self.source = str(config.get("source", ""))
         self.timeout = int(config.get("timeout", 120))
-        self.token_cache_ttl = int(config.get("token_cache_ttl", 600))
+        self.token_cache_ttl = int(config.get("token_cache_ttl", 0))
         self._cached_token = None
         self._cached_token_time = 0
         self.session_map = {}
@@ -71,7 +71,11 @@ class LLMProvider(LLMProviderBase):
             return self._decrypt_token_if_needed(self.token)
         if not self.token_url:
             raise ValueError("TencentAgent requires token or token_url")
-        if self._cached_token and time.time() - self._cached_token_time < self.token_cache_ttl:
+        if (
+            self.token_cache_ttl > 0
+            and self._cached_token
+            and time.time() - self._cached_token_time < self.token_cache_ttl
+        ):
             return self._cached_token
 
         params = {}
@@ -100,8 +104,9 @@ class LLMProvider(LLMProviderBase):
         if not token:
             raise ValueError("TencentAgent token_url response does not contain token")
         token = self._decrypt_token_if_needed(token)
-        self._cached_token = token
-        self._cached_token_time = time.time()
+        if self.token_cache_ttl > 0:
+            self._cached_token = token
+            self._cached_token_time = time.time()
         return token
 
     def _last_user_content(self, dialogue):
@@ -117,7 +122,7 @@ class LLMProvider(LLMProviderBase):
                 function_def["description"] = (
                     "Set the audio speaker volume immediately. Use this tool directly "
                     "when the user asks to set volume to an explicit value, such as "
-                    "'音量调到80' or 'set volume to 80'. Do not call get_device_status first "
+                    "'set volume to 80'. Do not call get_device_status first "
                     "for explicit target values. The volume argument is an integer from 0 to 100."
                 )
             elif name.endswith("get_device_status"):
@@ -134,7 +139,7 @@ class LLMProvider(LLMProviderBase):
         return """
 
 TencentAgent tool routing rules:
-1. For explicit volume commands like "音量调到80", "把声音设为60", or "set volume to 50", call `self_audio_speaker_set_volume` directly with {"volume": number}. Do not call `self_get_device_status` first.
+1. For explicit volume commands with a target number, call `self_audio_speaker_set_volume` directly with {"volume": number}. Do not call `self_get_device_status` first.
 2. Use `self_get_device_status` only when the user asks about current status or requests a relative adjustment without a clear target value.
 3. For device-control commands, output only one <tool_call> JSON block and no extra text.
 """
