@@ -16,6 +16,7 @@ import requests
 import websockets
 from config.logger import setup_logging
 from core.providers.llm.base import LLMProviderBase
+from core.providers.llm.system_prompt import get_system_prompt_for_function
 
 TAG = __name__
 logger = setup_logging()
@@ -97,6 +98,37 @@ class LLMProvider(LLMProviderBase):
     def _last_user_content(self, dialogue):
         last_msg = next(m for m in reversed(dialogue) if m.get("role") == "user")
         return str(last_msg.get("content", ""))
+
+    def _build_function_dialogue(self, dialogue, functions):
+        prepared = [dict(message) for message in dialogue]
+
+        if functions:
+            function_str = json.dumps(functions, ensure_ascii=False)
+            function_prompt = get_system_prompt_for_function(function_str)
+            for index in range(len(prepared) - 1, -1, -1):
+                if prepared[index].get("role") == "user":
+                    prepared[index]["content"] = function_prompt + str(
+                        prepared[index].get("content", "")
+                    )
+                    break
+
+        if prepared and prepared[-1].get("role") == "tool":
+            tool_result = str(prepared[-1].get("content", ""))
+            tool_prompt = (
+                "\n\ntool call result:\n"
+                + tool_result
+                + "\n\nUse the tool result above to continue the user's request. "
+                "If another tool is needed, call exactly one tool in <tool_call> JSON format. "
+                "Otherwise answer the user directly."
+            )
+            for index in range(len(prepared) - 1, -1, -1):
+                if prepared[index].get("role") == "user":
+                    prepared[index]["content"] = (
+                        str(prepared[index].get("content", "")) + tool_prompt
+                    )
+                    break
+
+        return prepared
 
     def _extract_reply_text(self, content):
         text = str(content or "")
@@ -222,5 +254,6 @@ class LLMProvider(LLMProviderBase):
             yield item
 
     def response_with_functions(self, session_id, dialogue, functions=None, **kwargs):
+        dialogue = self._build_function_dialogue(dialogue, functions)
         for token in self.response(session_id, dialogue, **kwargs):
             yield token, None
