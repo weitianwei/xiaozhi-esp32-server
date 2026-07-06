@@ -1,6 +1,7 @@
 import asyncio
 import json
 import random
+import re
 import string
 import threading
 import time
@@ -193,6 +194,28 @@ TencentAgent tool routing rules:
                     return str(value)
         return text
 
+    def _normalize_tool_call_text(self, text):
+        if not text or "<tool_call>" not in text:
+            return text
+        match = re.search(
+            r"<tool_call>\s*<direct_answer>\s*(\{.*?\})\s*</direct_answer>\s*</tool_call>",
+            text,
+            flags=re.DOTALL,
+        )
+        if not match:
+            return text
+        try:
+            payload = json.loads(match.group(1))
+        except Exception:
+            return text
+        normalized = {
+            "name": "direct_answer",
+            "arguments": {
+                "response": str(payload.get("response", "")),
+            },
+        }
+        return "<tool_call>\n" + json.dumps(normalized, ensure_ascii=False) + "\n</tool_call>"
+
     async def _run_chat(self, session_id, content, out_queue):
         token = self._get_token()
         session_key = session_id or "default"
@@ -258,7 +281,9 @@ TencentAgent tool routing rules:
                 if payload.get("can_rating") is False and not payload.get("is_final"):
                     continue
 
-                text = self._extract_reply_text(payload.get("content") or "")
+                text = self._normalize_tool_call_text(
+                    self._extract_reply_text(payload.get("content") or "")
+                )
                 if text:
                     if text.startswith(last_text):
                         delta = text[len(last_text):]
