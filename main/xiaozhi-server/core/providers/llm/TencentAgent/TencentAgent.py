@@ -5,6 +5,7 @@ import string
 import threading
 import time
 import uuid
+from copy import deepcopy
 from queue import Empty, Queue
 
 try:
@@ -37,6 +38,9 @@ class LLMProvider(LLMProviderBase):
         self.agent_id = str(config.get("agent_id", ""))
         self.source = str(config.get("source", ""))
         self.timeout = int(config.get("timeout", 120))
+        self.token_cache_ttl = int(config.get("token_cache_ttl", 600))
+        self._cached_token = None
+        self._cached_token_time = 0
         self.session_map = {}
 
     def _random_request_id(self, length=10):
@@ -67,6 +71,8 @@ class LLMProvider(LLMProviderBase):
             return self._decrypt_token_if_needed(self.token)
         if not self.token_url:
             raise ValueError("TencentAgent requires token or token_url")
+        if self._cached_token and time.time() - self._cached_token_time < self.token_cache_ttl:
+            return self._cached_token
 
         params = {}
         if self.agent_id:
@@ -93,18 +99,55 @@ class LLMProvider(LLMProviderBase):
         )
         if not token:
             raise ValueError("TencentAgent token_url response does not contain token")
-        return self._decrypt_token_if_needed(token)
+        token = self._decrypt_token_if_needed(token)
+        self._cached_token = token
+        self._cached_token_time = time.time()
+        return token
 
     def _last_user_content(self, dialogue):
         last_msg = next(m for m in reversed(dialogue) if m.get("role") == "user")
         return str(last_msg.get("content", ""))
 
+    def _prepare_functions_for_prompt(self, functions):
+        prepared = deepcopy(functions or [])
+        for tool in prepared:
+            function_def = tool.get("function", {}) if isinstance(tool, dict) else {}
+            name = function_def.get("name", "")
+            if name.endswith("audio_speaker_set_volume"):
+                function_def["description"] = (
+                    "Set the audio speaker volume immediately. Use this tool directly "
+                    "when the user asks to set volume to an explicit value, such as "
+                    "'音量调到80' or 'set volume to 80'. Do not call get_device_status first "
+                    "for explicit target values. The volume argument is an integer from 0 to 100."
+                )
+            elif name.endswith("get_device_status"):
+                description = str(function_def.get("description", ""))
+                function_def["description"] = (
+                    description
+                    + "\nOnly call this before volume control when the user asks for a relative "
+                    "change such as 'turn it up a little' or asks for current device status. "
+                    "Do not call it before setting an explicit volume value."
+                )
+        return prepared
+
+    def _function_call_rules_prompt(self):
+        return """
+
+TencentAgent tool routing rules:
+1. For explicit volume commands like "音量调到80", "把声音设为60", or "set volume to 50", call `self_audio_speaker_set_volume` directly with {"volume": number}. Do not call `self_get_device_status` first.
+2. Use `self_get_device_status` only when the user asks about current status or requests a relative adjustment without a clear target value.
+3. For device-control commands, output only one <tool_call> JSON block and no extra text.
+"""
+
     def _build_function_dialogue(self, dialogue, functions):
         prepared = [dict(message) for message in dialogue]
 
         if functions:
-            function_str = json.dumps(functions, ensure_ascii=False)
-            function_prompt = get_system_prompt_for_function(function_str)
+            function_str = json.dumps(self._prepare_functions_for_prompt(functions), ensure_ascii=False)
+            function_prompt = (
+                get_system_prompt_for_function(function_str)
+                + self._function_call_rules_prompt()
+            )
             for index in range(len(prepared) - 1, -1, -1):
                 if prepared[index].get("role") == "user":
                     prepared[index]["content"] = function_prompt + str(
